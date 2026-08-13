@@ -1,0 +1,14 @@
+[
+  {
+    "id": "topic_001",
+    "topic": "Generative AI in Healthcare",
+    "domain": "Medical / AI",
+    "expected_keywords": ["diagnosis", "clinical", "LLM", "patient outcome"]
+  },
+  {
+    "id": "topic_002",
+    "topic": "Quantum Computing Scalability",
+    "domain": "Physics / Tech",
+    "expected_keywords": ["qubits", "coherence", "quantum supremacy", "error correction"]
+  }
+]

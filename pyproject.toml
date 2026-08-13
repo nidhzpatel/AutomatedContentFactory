@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automated-content-factory"
+version = "0.1.0"
+description = "Multi-agent automated content creation factory built with CrewAI and FastAPI"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "nidhzpatel", email = "rajkotiyanidhi1998@gmail.com" }
+]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "crewai>=0.1.0",
+    "langchain>=0.1.0",
+    "tavily-python>=0.3.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.11.0",
+    "flake8>=6.1.0",
+    "httpx>=0.25.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+
