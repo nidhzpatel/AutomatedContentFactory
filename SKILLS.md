@@ -58,6 +58,6 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 | GET | `/health` | Liveness check |
 | GET | `/` | Status banner |
 
-## Scaffolding (not yet live — Phase 4)
+## Fully Wired
 
-The pipeline is fully wired through CrewAI (`ResearchCrew`, `ContentCrew`, `QualityCrew` under `ContentFactoryFlow`) with RAG grounding and optional Tavily web search; a direct-Ollama fallback covers any CrewAI failure. Not yet wired: the social-media task factory (`backend/tasks/social_task.py` — social generation currently lives in the flow's `generate_social_media`).
+The entire pipeline runs through CrewAI — `ResearchCrew`, `ContentCrew`, `QualityCrew`, and `SocialCrew` under `ContentFactoryFlow` — with RAG grounding and optional Tavily web search. A direct-Ollama fallback (with parallel social-format generation via `asyncio.gather`) covers any CrewAI failure. No scaffolding stubs remain.

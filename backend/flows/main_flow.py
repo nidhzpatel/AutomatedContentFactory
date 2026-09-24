@@ -227,63 +227,92 @@ class MainContentFlow:
             passed=passed,
         )
 
+    async def _generate_social_post(
+        self,
+        client: httpx.AsyncClient,
+        prompt: str,
+        system_prompt: str,
+        max_tokens: int,
+        fallback: str,
+    ) -> str:
+        text = await async_query_ollama(client, prompt, system_prompt=system_prompt, max_tokens=max_tokens)
+        return text or fallback
+
+    async def _run_social_crew(self) -> Optional[Dict[str, Any]]:
+        """Try the CrewAI SocialCrew; None signals fallback to direct generation."""
+        try:
+            from backend.crews.social_crew import SocialCrew
+        except ImportError:
+            logger.info("crewai not installed; skipping SocialCrew")
+            return None
+        try:
+            result = await asyncio.to_thread(SocialCrew(self.topic).run)
+            logger.info("SocialCrew completed via CrewAI")
+            return result
+        except Exception as e:
+            logger.error(f"SocialCrew failed ({e}); falling back to direct generation")
+            return None
+
     async def generate_social_media(self, client: httpx.AsyncClient) -> Dict[str, Any]:
         logger.info("Generating tailored LinkedIn, X, and Detailed Overview outputs")
-        
-        # LinkedIn Prompt
-        li_prompt = (
+
+        linkedin_prompt = (
             f"Write a high-converting, professional LinkedIn post about '{self.topic}'.\n"
             "Include hook, bulleted takeaways, discussion question, and 3-5 hashtags.\n"
             "IMPORTANT: Do NOT use raw markdown headers like ### or **. Use clean plain text."
         )
-        linkedin_text = await async_query_ollama(client, li_prompt, system_prompt="You are a LinkedIn content strategist.", max_tokens=600)
-        if not linkedin_text:
-            linkedin_text = (
-                f"🚀 Big shifts are happening in {self.topic}.\n\n"
-                f"Here are 3 key takeaways every professional should know:\n\n"
-                f"🔹 1. Early adoption creates a competitive moat.\n"
-                f"🔹 2. Focus on core architectural fundamentals before scaling.\n"
-                f"🔹 3. Continuous evaluation and testing are paramount.\n\n"
-                f"What's your biggest challenge when implementing {self.topic}?\n\n"
-                f"#TechTrends #{self.topic.replace(' ', '')} #Innovation #Leadership #AI"
-            )
+        linkedin_fallback = (
+            f"🚀 Big shifts are happening in {self.topic}.\n\n"
+            f"Here are 3 key takeaways every professional should know:\n\n"
+            f"🔹 1. Early adoption creates a competitive moat.\n"
+            f"🔹 2. Focus on core architectural fundamentals before scaling.\n"
+            f"🔹 3. Continuous evaluation and testing are paramount.\n\n"
+            f"What's your biggest challenge when implementing {self.topic}?\n\n"
+            f"#TechTrends #{self.topic.replace(' ', '')} #Innovation #Leadership #AI"
+        )
 
-        # X/Twitter Prompt
         x_prompt = (
             f"Write a punchy X/Twitter post or thread about '{self.topic}'.\n"
             "Include opening line, 2-3 numbered key takeaways, and hashtags.\n"
             "IMPORTANT: Do NOT use raw markdown headers like ### or **."
         )
-        x_text = await async_query_ollama(client, x_prompt, system_prompt="You are a tech influencer on X/Twitter.", max_tokens=500)
-        if not x_text:
-            x_text = (
-                f"💡 Quick breakdown on {self.topic}:\n\n"
-                f"1/ Understanding the fundamentals is key.\n"
-                f"2/ Prioritize security, performance, and scalability.\n"
-                f"3/ The tech is evolving fast—stay ahead of the curve.\n\n"
-                f"What are your thoughts on {self.topic}? 🧵👇\n\n"
-                f"#{self.topic.replace(' ', '')} #Tech #BuildInPublic"
-            )
+        x_fallback = (
+            f"💡 Quick breakdown on {self.topic}:\n\n"
+            f"1/ Understanding the fundamentals is key.\n"
+            f"2/ Prioritize security, performance, and scalability.\n"
+            f"3/ The tech is evolving fast—stay ahead of the curve.\n\n"
+            f"What are your thoughts on {self.topic}? 🧵👇\n\n"
+            f"#{self.topic.replace(' ', '')} #Tech #BuildInPublic"
+        )
 
-        # Detailed Technical Overview
         overview_prompt = (
             f"Write a detailed technical reference overview and deep dive on '{self.topic}'.\n"
             "Include Technical Definition, System Architecture, Core Safeguards, and Reference Links [Title](URL)."
         )
-        overview_text = await async_query_ollama(client, overview_prompt, system_prompt="You are a principal software architect.", max_tokens=1500)
-        if not overview_text:
-            sanitized = self.topic.lower().replace(" ", "-")
-            overview_text = (
-                f"# Detailed Technical Overview: {self.topic}\n\n"
-                f"## 1. System Architecture & Technical Definition\n"
-                f"**{self.topic}** represents a fundamental domain in modern software engineering.\n\n"
-                f"## 2. Core Operational Safeguards\n"
-                f"- **Input Validation**: Strict schema enforcement and sanitization.\n"
-                f"- **Observability**: Real-time logging and execution tracing.\n\n"
-                f"## 3. Recommended Reference Links & Further Reading\n"
-                f"- 📄 [arXiv Research Index](https://arxiv.org/search/?query={sanitized})\n"
-                f"- 🐙 [GitHub Repository Search](https://github.com/search?q={sanitized})\n"
-                f"- 🛡️ [OWASP AI & LLM Top 10 Guidelines](https://owasp.org/)\n"
+        sanitized = self.topic.lower().replace(" ", "-")
+        overview_fallback = (
+            f"# Detailed Technical Overview: {self.topic}\n\n"
+            f"## 1. System Architecture & Technical Definition\n"
+            f"**{self.topic}** represents a fundamental domain in modern software engineering.\n\n"
+            f"## 2. Core Operational Safeguards\n"
+            f"- **Input Validation**: Strict schema enforcement and sanitization.\n"
+            f"- **Observability**: Real-time logging and execution tracing.\n\n"
+            f"## 3. Recommended Reference Links & Further Reading\n"
+            f"- 📄 [arXiv Research Index](https://arxiv.org/search/?query={sanitized})\n"
+            f"- 🐙 [GitHub Repository Search](https://github.com/search?q={sanitized})\n"
+            f"- 🛡️ [OWASP AI & LLM Top 10 Guidelines](https://owasp.org/)\n"
+        )
+
+        crew_result = await self._run_social_crew()
+        if crew_result is not None:
+            linkedin_text = crew_result["linkedin"]
+            x_text = crew_result["x_post"]
+            overview_text = crew_result["overview"]
+        else:
+            linkedin_text, x_text, overview_text = await asyncio.gather(
+                self._generate_social_post(client, linkedin_prompt, "You are a LinkedIn content strategist.", 600, linkedin_fallback),
+                self._generate_social_post(client, x_prompt, "You are a tech influencer on X/Twitter.", 500, x_fallback),
+                self._generate_social_post(client, overview_prompt, "You are a principal software architect.", 1500, overview_fallback),
             )
 
         campaign = SocialMediaCampaign(posts=[

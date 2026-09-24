@@ -20,9 +20,9 @@ Automated Content Factory: a multi-stage content generation pipeline (research �
 | Backend (dev) | `./scripts/run.sh` — uvicorn `backend.main:app` on `:8000` (uses `venv/bin/uvicorn` if present) |
 | Frontend (dev) | `cd frontend && npm install && npm start` — on `:3000`, proxies `/api` to `:8000` |
 | Docker | `docker-compose up --build` — backend + redis (redis is declared but **unused** by code) |
-| Tests (fast) | `venv/bin/python -m pytest tests/unit tests/security -q` (44 tests) |
+| Tests (fast) | `venv/bin/python -m pytest tests/unit tests/security -q` (49 tests) |
 | Lint (unenforced) | `black .`, `flake8 .` |
-| Evaluation | `venv/bin/python -m evaluation.run_evaluation` — **must be run as a module from repo root**; `python evaluation/run_evaluation.py` fails (`ModuleNotFoundError: No module named 'evaluation'`) |
+| Evaluation | `venv/bin/python -m evaluation.run_evaluation` — synthetic samples, fast; add `--live` to score real pipeline output (needs Ollama, ~minutes/topic). **Must be run as a module from repo root**; `python evaluation/run_evaluation.py` fails (`ModuleNotFoundError: No module named 'evaluation'`) |
 
 **Integration tests** (`tests/integration/test_flows.py`) call Ollama at `localhost:11434`. A down Ollama fails fast (connection refused → canned fallbacks), so the test still passes quickly; the 90 s httpx timeout only bites when Ollama accepts connections but hangs. With Ollama up, the test runs the full real pipeline (~4 min). Run it only with Ollama up.
 
@@ -36,6 +36,8 @@ Automated Content Factory: a multi-stage content generation pipeline (research �
 - **CrewAI wiring:** `crew.kickoff()` and `flow.kickoff()` are blocking — never call from async code without `asyncio.to_thread` (the CrewAI Flow itself runs inside `to_thread` from `execute()`). Crews and agents set `memory=False` so CrewAI never tries to call OpenAI embeddings behind your back.
 - **RAG (`backend/rag/`):** `store.py` holds a lazily-created chromadb `PersistentClient` (`settings.CHROMA_PERSIST_DIR`, gitignored); `embedder.py` calls Ollama `/api/embed` (batched `embed_documents` for ingestion); `ingestion.py` chunks (~500 chars, 50 overlap) and stores; `retriever.py` fails soft to `[]`. Grounding is wired into the research task (topic retrieval) and the fact-check task (draft excerpt retrieval) — both degrade to ungrounded when retrieval fails. `ingest_document()` is blocking: the `/api/ingest` route wraps it in `asyncio.to_thread`.
 - **Web search (`backend/tools/tavily_search.py`):** `create_tavily_search_tool()` returns a crewai `TavilySearchTool` when `TAVILY_API_KEY` is set, else `None` — the researcher agent attaches `tools=[tool] if tool else []`. The standalone `tavily_search_tool(query)` is for non-agent callers.
+- **Social stage:** `generate_social_media` tries `SocialCrew` (social strategist agent + LinkedIn/X/overview tasks) first, then falls back to **parallel** direct generation — the three formats are fetched concurrently via `asyncio.gather` (`_generate_social_post`), each with its own canned fallback.
+- **Tracing (`backend/observability/tracer.py`):** `trace_execution(step, payload)` emits JSON-lines events (`{ts, step, payload}`) to stdout after every pipeline stage on both paths — greppable and collector-parseable.
 - **CrewAI Flow gotchas (verified on crewai 1.15):** flow state is hydrated with `kickoff(inputs={...})` — `state=` at construction is silently ignored; state models used with `Flow[State]` need defaults on every field because the flow projection re-validates them (hence `FlowState.topic = ""`). Revision loops need **two routers** (`@router(review)` + `@router(re_review)`) — a single router behind an `or_()` listener does not re-fire after the first pass. Flow methods can only `@listen` to methods defined *above* them in the class body, and a handler can't listen to a route key equal to its own name.
 - **"Agents":** `backend/agents/*.py` build real CrewAI `Agent` objects (role/goal/backstory preserved verbatim) with `llm=get_llm(...)` and `memory=False`. The direct fallback path implements equivalent behavior as flow methods with hand-built system prompts.
 - **Config:** single pydantic-settings `Settings` singleton — import as `from backend.config import settings` (`env_file=".env"`, `extra="ignore"`). `OLLAMA_BASE_URL` / `OLLAMA_MODEL` (in `backend/config.py`) are the settings that matter; both are now in `.env.example`.
@@ -57,7 +59,6 @@ Automated Content Factory: a multi-stage content generation pipeline (research �
 - Frontend is a single 475-line `App.js` (CRA, no router, inline styles) — match that style unless deliberately restructuring.
 - CORS is `allow_origins=["*"]` — known-loose, fine for local dev; flag it if you touch deployment/auth (there is no auth).
 
-## Intentional Scaffolding (unwired by design — don't wire or remove without a decision)
+## Reserved Infrastructure (not wired — needs a decision before use)
 
-- `backend/tasks/social_task.py` — stub awaiting Phase 4 (social generation is currently the flow's `generate_social_media`, not a CrewAI task).
-- redis in `docker-compose.yml` + `REDIS_URL` / `VECTOR_DB_URL` in config — reserved for future caching needs; the RAG layer uses chromadb directly, not redis.
+- redis in `docker-compose.yml` + `REDIS_URL` / `VECTOR_DB_URL` in config — reserved for future caching; the RAG layer uses chromadb directly, not redis.
