@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3:latest"
 
+    # LLM Routing (cloud fallback when Ollama is unavailable)
+    LLM_CLOUD_ENABLED: bool = True
+    OPENAI_FALLBACK_MODEL: str = "gpt-4o-mini"
+    ANTHROPIC_FALLBACK_MODEL: str = "claude-3-5-haiku-latest"
+    LLM_CIRCUIT_FAILURE_THRESHOLD: int = 3
+    LLM_CIRCUIT_RECOVERY_SECONDS: float = 300.0
+
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 

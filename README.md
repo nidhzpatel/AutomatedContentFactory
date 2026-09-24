@@ -1,11 +1,12 @@
 # Automated Content Factory
 
-An autonomous multi-agent content generation workflow built using CrewAI, FastAPI, and React.
+An autonomous multi-agent content generation workflow built with CrewAI, FastAPI, and React — powered by a local Ollama LLM with automatic cloud fallback, private by default with zero per-call API cost.
 
 ## 🚀 Features
 
-- **Multi-Agent Pipeline**: Research, Draft, Critique, Edit, and Fact-Check content autonomously.
-- **RAG Support**: Ingest and retrieve contextual domain knowledge.
+- **Multi-Agent Pipeline**: CrewAI-powered research, drafting, critique, fact-check, and edit stages with a self-correcting revision loop.
+- **Resilient LLM Routing**: Local Ollama primary with automatic cloud fallback (OpenAI/Anthropic) behind a circuit breaker.
+- **RAG-Ready Structure**: Ingestion/retrieval scaffolding in `backend/rag/` for future domain-knowledge grounding.
 - **Guardrails**: Input validation, output verification, and hallucination checks.
 - **Observability**: Built-in logging and execution tracing.
 - **Web UI**: Modern React frontend for triggering workflows and reviewing generated content.
@@ -14,7 +15,7 @@ An autonomous multi-agent content generation workflow built using CrewAI, FastAP
 
 ```
 automated-content-factory/
-├── backend/            # FastAPI backend, CrewAI agents, crews & flows
+├── backend/            # FastAPI backend: CrewAI crews & flows, guardrails, RAG scaffolding
 ├── frontend/           # React user interface
 ├── tests/              # Unit, integration, and security tests
 ├── evaluation/         # Benchmark topics and metric evaluation scripts
@@ -25,7 +26,9 @@ automated-content-factory/
 
 ## 🚦 Getting Started
 
-1. Copy `.env.example` to `.env` and supply your API keys:
+Requires **Python 3.10–3.13** (CrewAI is not yet compatible with Python 3.14).
+
+1. Copy `.env.example` to `.env` and adjust as needed. The only hard requirement is a running local Ollama (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`); the listed API keys power the optional cloud fallback and future integrations:
    ```bash
    cp .env.example .env
    ```

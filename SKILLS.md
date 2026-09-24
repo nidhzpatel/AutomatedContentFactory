@@ -12,7 +12,7 @@ Capability catalog of the Automated Content Factory pipeline — what the system
 | 4 | Fact-Check | Verification & Hallucination Auditor | Verify claims, produce a fact-check report with pass/fail |
 | 5 | Edit | Executive Revision Editor | Revise the draft against critique + fact-check feedback; re-enter the check loop |
 
-The critic and fact-checker gate a **revision loop** (up to `max_revisions = 3`): the editor revises until both approve or the cap is hit.
+The critic and fact-checker gate a **revision loop** (up to `max_revisions = 3`): the editor revises until both approve or the cap is hit. Stages 1–2 (Research, Draft) execute as CrewAI crews; stages 3–5 currently run inside the flow with direct Ollama calls until migration Phase 2.
 
 ## Output Formats
 
@@ -22,7 +22,7 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 - `linkedin_post` — LinkedIn-formatted post
 - `x_post` — X/Twitter-formatted post
 - `detailed_overview` — extended summary
-- `metrics` — latency, revision-loop count, fact-check %, hallucination %, word count
+- `metrics` — `latency_ms`, `revision_count`, `fact_check_score`, `hallucination_rate` (0–1), `word_count`
 
 ## Safety & Quality Guardrails
 
@@ -35,12 +35,13 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 
 - Runtime metrics returned with every generation (see above).
 - `evaluation/metrics/metrics.py`: readability score, keyword-relevance score, word count, hallucination scan.
-- `evaluation/run_evaluation.py` — benchmark over `evaluation/datasets/topics.json` topics with expected keywords. Run: `python -m evaluation.run_evaluation` (from repo root, as a module).
+- `evaluation/run_evaluation.py` — benchmark over `evaluation/datasets/topics.json` topics with expected keywords. Note: it scores synthetic sample text built from each topic + keywords, not live pipeline output (`MainContentFlow` is imported but unused). Run: `python -m evaluation.run_evaluation` (from repo root, as a module).
 
 ## Model Runtime
 
 - LLM: **local Ollama** (default model `llama3:latest`, configurable via `OLLAMA_BASE_URL` / `OLLAMA_MODEL` in `.env`) — private, zero per-call API cost.
-- Graceful degradation: if Ollama is unreachable, the pipeline returns canned fallback content instead of erroring.
+- **Fallback chain:** if Ollama fails a health probe, a circuit breaker routes to OpenAI (`gpt-4o-mini`) then Anthropic (`claude-3-5-haiku-latest`) — only when `LLM_CLOUD_ENABLED=true` and the matching API key is configured.
+- Graceful degradation: if no backend is usable, the pipeline returns canned fallback content instead of erroring.
 
 ## API Surface
 
@@ -50,6 +51,6 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 | GET | `/health` | Liveness check |
 | GET | `/` | Status banner |
 
-## Scaffolding (defined, not yet live)
+## Scaffolding (not yet live — migration Phases 2–3)
 
-CrewAI-shaped stubs exist for future extension and are **not wired into the pipeline**: sub-crews (`backend/crews/`), task definitions (`backend/tasks/`), RAG ingestion/embed/retrieve (`backend/rag/`), and the Tavily search tool.
+The research and drafting stages **are** wired: they run as CrewAI crews (`ResearchCrew`, `ContentCrew`) with a direct-Ollama fallback. Not yet wired: the quality crew (`backend/crews/quality_crew.py`), the remaining task factories in `backend/tasks/` (critic, fact-check, edit, social), RAG ingestion/embed/retrieve (`backend/rag/` — chromadb is already installed), and the Tavily search tool.

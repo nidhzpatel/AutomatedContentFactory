@@ -151,8 +151,28 @@ class MainContentFlow:
         self.topic = topic
         self.state = FlowState(topic=topic)
 
+    async def _run_research_crew(self) -> Optional[ResearchOutput]:
+        """Try the CrewAI ResearchCrew; None signals fallback to the direct path."""
+        try:
+            from backend.crews.research_crew import ResearchCrew
+        except ImportError:
+            logger.info("crewai not installed; skipping ResearchCrew")
+            return None
+        try:
+            result = await asyncio.to_thread(ResearchCrew(self.topic).run)
+            logger.info(f"ResearchCrew completed via CrewAI (sources: {len(result.sources)})")
+            return result
+        except Exception as e:
+            logger.error(f"ResearchCrew failed ({e}); falling back to direct Ollama path")
+            return None
+
     async def run_researcher(self, client: httpx.AsyncClient) -> ResearchOutput:
         logger.info(f"ResearcherAgent executing for topic: {self.topic}")
+
+        crew_result = await self._run_research_crew()
+        if crew_result is not None:
+            return crew_result
+
         prompt = (
             f"Gather detailed research analysis and findings for '{self.topic}'.\n"
             "Provide key findings, technical background, and reputable source links."
@@ -176,8 +196,28 @@ class MainContentFlow:
             summary=summary,
         )
 
+    async def _run_content_crew(self, research: ResearchOutput) -> Optional[DraftContent]:
+        """Try the CrewAI ContentCrew; None signals fallback to the direct path."""
+        try:
+            from backend.crews.content_crew import ContentCrew
+        except ImportError:
+            logger.info("crewai not installed; skipping ContentCrew")
+            return None
+        try:
+            result = await asyncio.to_thread(ContentCrew(self.topic, research).run)
+            logger.info(f"ContentCrew completed via CrewAI (words: {result.word_count})")
+            return result
+        except Exception as e:
+            logger.error(f"ContentCrew failed ({e}); falling back to direct Ollama path")
+            return None
+
     async def run_writer(self, client: httpx.AsyncClient, research: ResearchOutput) -> DraftContent:
         logger.info("WriterAgent generating initial draft content")
+
+        crew_result = await self._run_content_crew(research)
+        if crew_result is not None:
+            return crew_result
+
         prompt = (
             f"Write a complete, highly detailed technical article about '{self.topic}' using research:\n{research.summary}\n"
             "Include Title, Introduction, Detailed Sections, and Conclusion. Format cleanly in Markdown."
