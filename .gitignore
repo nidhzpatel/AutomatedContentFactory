@@ -53,5 +53,8 @@ htmlcov/
 *.log
 logs/
 
+# Vector DB (local RAG store)
+chroma_db/
+
 # Docs (local only)
 docs/

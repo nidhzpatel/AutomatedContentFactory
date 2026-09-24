@@ -43,14 +43,21 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 - **Fallback chain:** if Ollama fails a health probe, a circuit breaker routes to OpenAI (`gpt-4o-mini`) then Anthropic (`claude-3-5-haiku-latest`) — only when `LLM_CLOUD_ENABLED=true` and the matching API key is configured.
 - Graceful degradation: if no backend is usable, the pipeline returns canned fallback content instead of erroring.
 
+## Knowledge & Grounding
+
+- **`POST /api/ingest`** — chunk, embed (Ollama `OLLAMA_EMBED_MODEL`, default `nomic-embed-text`), and store a document in the local chromadb collection (`CHROMA_PERSIST_DIR`, default `./chroma_db`, gitignored).
+- Research tasks are prepended with retrieved internal knowledge (`retrieve_context(topic)`), and the fact-checker receives grounding chunks with the draft audit.
+- Retrieval fails soft: any error returns `[]` and the stage continues ungrounded.
+
 ## API Surface
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/generate` | Run the full pipeline for a topic |
+| POST | `/api/ingest` | Add a document to the RAG knowledge base |
 | GET | `/health` | Liveness check |
 | GET | `/` | Status banner |
 
-## Scaffolding (not yet live — Phase 3)
+## Scaffolding (not yet live — Phase 4)
 
-The pipeline is fully wired through CrewAI: `ResearchCrew`, `ContentCrew`, and `QualityCrew` (critique + fact-check + edit) run under `ContentFactoryFlow`, with a direct-Ollama fallback. Not yet wired: the social-media task factory (`backend/tasks/social_task.py` — social generation currently lives in the flow's `generate_social_media`), RAG ingestion/embed/retrieve (`backend/rag/` — chromadb is already installed), and the Tavily search tool.
+The pipeline is fully wired through CrewAI (`ResearchCrew`, `ContentCrew`, `QualityCrew` under `ContentFactoryFlow`) with RAG grounding and optional Tavily web search; a direct-Ollama fallback covers any CrewAI failure. Not yet wired: the social-media task factory (`backend/tasks/social_task.py` — social generation currently lives in the flow's `generate_social_media`).

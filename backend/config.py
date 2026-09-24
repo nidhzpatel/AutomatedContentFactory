@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3:latest"
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
+    CHROMA_PERSIST_DIR: str = "./chroma_db"
 
     # LLM Routing (cloud fallback when Ollama is unavailable)
     LLM_CLOUD_ENABLED: bool = True

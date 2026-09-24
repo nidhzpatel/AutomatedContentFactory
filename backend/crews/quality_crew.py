@@ -31,8 +31,13 @@ class QualityCrew:
         self.research = research
 
     def review(self, draft: DraftContent) -> tuple:
+        from backend.rag.retriever import retrieve_context
+
+        grounding_chunks = retrieve_context(draft.body[:300], top_k=2)
+        grounding = "\n".join(c["text"] for c in grounding_chunks)
+
         critic_task = create_critic_task(draft.body)
-        fact_task = create_fact_check_task(self.topic, draft.body, self.research.summary)
+        fact_task = create_fact_check_task(self.topic, draft.body, self.research.summary, grounding)
 
         crew = Crew(
             agents=[critic_task.agent, fact_task.agent],

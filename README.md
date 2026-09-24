@@ -6,7 +6,8 @@ An autonomous multi-agent content generation workflow built with CrewAI, FastAPI
 
 - **Multi-Agent Pipeline**: CrewAI-powered research, drafting, critique, fact-check, and edit stages with a self-correcting revision loop.
 - **Resilient LLM Routing**: Local Ollama primary with automatic cloud fallback (OpenAI/Anthropic) behind a circuit breaker.
-- **RAG-Ready Structure**: Ingestion/retrieval scaffolding in `backend/rag/` for future domain-knowledge grounding.
+- **RAG Knowledge Base**: Ingest domain documents via `POST /api/ingest`; research and fact-check stages are grounded with local embeddings (Ollama + chromadb).
+- **Web Search**: The researcher agent searches the live web via Tavily when an API key is configured.
 - **Guardrails**: Input validation, output verification, and hallucination checks.
 - **Observability**: Built-in logging and execution tracing.
 - **Web UI**: Modern React frontend for triggering workflows and reviewing generated content.
@@ -15,7 +16,7 @@ An autonomous multi-agent content generation workflow built with CrewAI, FastAPI
 
 ```
 automated-content-factory/
-├── backend/            # FastAPI backend: CrewAI crews & flows, guardrails, RAG scaffolding
+├── backend/            # FastAPI backend: CrewAI crews & flows, guardrails, RAG knowledge base
 ├── frontend/           # React user interface
 ├── tests/              # Unit, integration, and security tests
 ├── evaluation/         # Benchmark topics and metric evaluation scripts
