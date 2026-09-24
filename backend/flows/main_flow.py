@@ -17,6 +17,8 @@ from backend.guardrails.output_guardrail import validate_output_content
 from backend.guardrails.hallucination_guardrail import check_hallucination
 from backend.observability.logger import get_logger
 from backend.observability.tracer import trace_execution
+from backend.parsing import parse_critique as _parse_critique
+from backend.parsing import parse_fact_check_response as _parse_fact_check_response
 
 logger = get_logger("main_flow")
 
@@ -47,95 +49,6 @@ async def async_query_ollama(client: httpx.AsyncClient, prompt: str, system_prom
         logger.error(f"Error querying Ollama: {e}")
 
     return ""
-
-
-def _extract_score(text: str, label: str) -> Optional[float]:
-    match = re.search(rf"{label}\s*[:=]?\s*(-?\d+(?:\.\d+)?)", text, re.IGNORECASE)
-    if not match:
-        return None
-    return max(0.0, min(10.0, float(match.group(1))))
-
-
-def _extract_verdict(text: str) -> Optional[bool]:
-    match = re.search(r"APPROVED\s*[:=]?\s*(YES|NO|TRUE|FALSE|PASS|FAIL)", text, re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).upper() in ("YES", "TRUE", "PASS")
-
-
-def _extract_suggestions(text: str) -> List[str]:
-    suggestions = []
-    in_section = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.upper().startswith("SUGGESTIONS"):
-            in_section = True
-            continue
-        if in_section and (stripped.startswith(("-", "*", "•")) or stripped[0].isdigit()):
-            cleaned = re.sub(r"^\d+[.)]\s*", "", stripped)
-            cleaned = re.sub(r"^[-*•\s]+", "", cleaned).strip()
-            if cleaned:
-                suggestions.append(cleaned)
-    return suggestions
-
-
-def _parse_critique(text: str, fallback_suggestions: List[str]) -> CritiqueFeedback:
-    """Parse structured critic output into CritiqueFeedback.
-
-    Falls back to lenient, pre-approved feedback when the LLM response is
-    empty or unparseable, so the pipeline degrades gracefully when Ollama
-    is unavailable.
-    """
-    fallback = CritiqueFeedback(
-        clarity_score=9.0,
-        engagement_score=8.8,
-        suggestions=fallback_suggestions,
-        approved=True,
-    )
-    if not text:
-        return fallback
-
-    clarity = _extract_score(text, "CLARITY")
-    engagement = _extract_score(text, "ENGAGEMENT")
-    if clarity is None or engagement is None:
-        return fallback
-
-    approved = _extract_verdict(text)
-    if approved is None:
-        approved = clarity >= 7.0 and engagement >= 7.0
-
-    suggestions = _extract_suggestions(text) or fallback_suggestions
-    return CritiqueFeedback(
-        clarity_score=clarity,
-        engagement_score=engagement,
-        suggestions=suggestions,
-        approved=approved,
-    )
-
-
-def _parse_fact_check_response(text: str) -> Tuple[List[FactCheckItem], Optional[bool]]:
-    """Parse the fact-checker audit into (items, passed).
-
-    Returns ([], None) when the response is empty or unparseable so the
-    caller can treat the audit as neutral instead of failing the pipeline.
-    """
-    if not text:
-        return [], None
-
-    verdict_match = re.search(r"VERDICT\s*[:=]?\s*(PASS|FAIL)", text, re.IGNORECASE)
-    passed = verdict_match.group(1).upper() == "PASS" if verdict_match else None
-
-    items = []
-    for line in text.splitlines():
-        claim_match = re.match(r"\s*[-*•]?\s*\[(VERIFIED|UNVERIFIED)\]\s*(.+)", line.strip(), re.IGNORECASE)
-        if claim_match:
-            items.append(FactCheckItem(
-                statement=claim_match.group(2).strip(),
-                is_verified=claim_match.group(1).upper() == "VERIFIED",
-            ))
-    return items, passed
 
 
 class MainContentFlow:
@@ -386,9 +299,84 @@ class MainContentFlow:
             "campaign": campaign,
         }
 
+    async def _run_crew_flow(self, start_time: float) -> Optional[Dict[str, Any]]:
+        """Run the CrewAI Flow orchestrator; None signals fallback to the direct pipeline."""
+        try:
+            from backend.flows.crew_flow import ContentFactoryFlow, InputGuardrailRejected
+        except ImportError:
+            logger.info("crewai flow unavailable; using direct pipeline")
+            return None
+
+        flow = ContentFactoryFlow()
+        try:
+            await asyncio.to_thread(lambda: flow.kickoff(inputs={"topic": self.topic}))
+        except InputGuardrailRejected as e:
+            logger.warning(f"Crew flow guardrail rejected prompt: {e.message}")
+            return {
+                "topic": self.topic,
+                "status": "failed_security_guardrail",
+                "error_message": e.message,
+                "latency_ms": round((time.time() - start_time) * 1000, 2),
+            }
+        except Exception as e:
+            logger.error(f"CrewAI flow failed ({e}); falling back to direct pipeline")
+            return None
+
+        return await self._assemble_result(flow.state, start_time)
+
+    async def _assemble_result(self, state: FlowState, start_time: float) -> dict:
+        """Output guardrail + social generation + response assembly (shared by both paths)."""
+        if not state.edited:
+            state.edited = EditedContent(
+                title=state.draft.title,
+                body=state.draft.body,
+                changes_made=["Final draft approved without extra revisions"],
+                word_count=state.draft.word_count,
+            )
+
+        if not validate_output_content(state.edited.body):
+            state.status = "failed_output_guardrail"
+            logger.warning("Output guardrail rejected final content")
+            return {
+                "topic": self.topic,
+                "status": "failed_output_guardrail",
+                "error_message": "Final content failed output validation",
+                "latency_ms": round((time.time() - start_time) * 1000, 2),
+            }
+
+        async with httpx.AsyncClient() as client:
+            social_data = await self.generate_social_media(client)
+        state.social = social_data["campaign"]
+        trace_execution("social_media", {"posts": len(state.social.posts)})
+
+        state.latency_ms = round((time.time() - start_time) * 1000, 2)
+        state.fact_check_score = state.fact_check.overall_trust_score
+        state.hallucination_rate = state.fact_check.hallucination_rate
+        state.status = "completed"
+
+        return {
+            "topic": self.topic,
+            "blog_post": {"title": state.edited.title, "content": state.edited.body},
+            "linkedin_post": {"content": social_data["linkedin"]},
+            "x_post": {"content": social_data["x_post"]},
+            "detailed_overview": {"content": social_data["overview"]},
+            "metrics": {
+                "latency_ms": state.latency_ms,
+                "revision_count": state.revision_count,
+                "fact_check_score": state.fact_check_score,
+                "hallucination_rate": state.hallucination_rate,
+                "word_count": state.edited.word_count,
+            },
+            "status": "completed",
+        }
+
     async def execute(self) -> dict:
         start_time = time.time()
         logger.info(f"Starting Multi-Agent Execution Flow for topic: '{self.topic}'")
+
+        crew_result = await self._run_crew_flow(start_time)
+        if crew_result is not None:
+            return crew_result
 
         # Step 1: Input Guardrail Check
         valid, msg = validate_input_prompt(self.topic)
@@ -447,40 +435,4 @@ class MainContentFlow:
                     word_count=self.state.draft.word_count,
                 )
 
-            # Step 7: Output Guardrail Check
-            if not validate_output_content(self.state.edited.body):
-                self.state.status = "failed_output_guardrail"
-                logger.warning("Output guardrail rejected final content")
-                return {
-                    "topic": self.topic,
-                    "status": "failed_output_guardrail",
-                    "error_message": "Final content failed output validation",
-                    "latency_ms": round((time.time() - start_time) * 1000, 2),
-                }
-
-            # Step 8: Social Media & Multi-Format Generation
-            social_data = await self.generate_social_media(client)
-            self.state.social = social_data["campaign"]
-            trace_execution("social_media", {"posts": len(self.state.social.posts)})
-
-        end_time = time.time()
-        self.state.latency_ms = round((end_time - start_time) * 1000, 2)
-        self.state.fact_check_score = self.state.fact_check.overall_trust_score
-        self.state.hallucination_rate = self.state.fact_check.hallucination_rate
-        self.state.status = "completed"
-
-        return {
-            "topic": self.topic,
-            "blog_post": {"title": self.state.edited.title, "content": self.state.edited.body},
-            "linkedin_post": {"content": social_data["linkedin"]},
-            "x_post": {"content": social_data["x_post"]},
-            "detailed_overview": {"content": social_data["overview"]},
-            "metrics": {
-                "latency_ms": self.state.latency_ms,
-                "revision_count": self.state.revision_count,
-                "fact_check_score": self.state.fact_check_score,
-                "hallucination_rate": self.state.hallucination_rate,
-                "word_count": self.state.edited.word_count,
-            },
-            "status": "completed",
-        }
+        return await self._assemble_result(self.state, start_time)

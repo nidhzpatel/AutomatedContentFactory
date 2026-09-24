@@ -12,7 +12,7 @@ Capability catalog of the Automated Content Factory pipeline — what the system
 | 4 | Fact-Check | Verification & Hallucination Auditor | Verify claims, produce a fact-check report with pass/fail |
 | 5 | Edit | Executive Revision Editor | Revise the draft against critique + fact-check feedback; re-enter the check loop |
 
-The critic and fact-checker gate a **revision loop** (up to `max_revisions = 3`): the editor revises until both approve or the cap is hit. Stages 1–2 (Research, Draft) execute as CrewAI crews; stages 3–5 currently run inside the flow with direct Ollama calls until migration Phase 2.
+The critic and fact-checker gate a **revision loop** (up to `max_revisions = 3`): the editor revises until both approve or the cap is hit. All stages execute through CrewAI crews orchestrated by `ContentFactoryFlow`'s router-driven loop, with a direct-Ollama fallback if the CrewAI flow fails.
 
 ## Output Formats
 
@@ -51,6 +51,6 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 | GET | `/health` | Liveness check |
 | GET | `/` | Status banner |
 
-## Scaffolding (not yet live — migration Phases 2–3)
+## Scaffolding (not yet live — Phase 3)
 
-The research and drafting stages **are** wired: they run as CrewAI crews (`ResearchCrew`, `ContentCrew`) with a direct-Ollama fallback. Not yet wired: the quality crew (`backend/crews/quality_crew.py`), the remaining task factories in `backend/tasks/` (critic, fact-check, edit, social), RAG ingestion/embed/retrieve (`backend/rag/` — chromadb is already installed), and the Tavily search tool.
+The pipeline is fully wired through CrewAI: `ResearchCrew`, `ContentCrew`, and `QualityCrew` (critique + fact-check + edit) run under `ContentFactoryFlow`, with a direct-Ollama fallback. Not yet wired: the social-media task factory (`backend/tasks/social_task.py` — social generation currently lives in the flow's `generate_social_media`), RAG ingestion/embed/retrieve (`backend/rag/` — chromadb is already installed), and the Tavily search tool.

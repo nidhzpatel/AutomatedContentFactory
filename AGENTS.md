@@ -6,9 +6,9 @@ Guidance for AI coding agents working in this repository.
 
 Automated Content Factory: a multi-stage content generation pipeline (research → draft → critique → fact-check → edit → social formats) behind a FastAPI backend, with a React SPA frontend.
 
-**Real runtime stack:** FastAPI + httpx → local Ollama (default `llama3:latest`). React 18 (CRA) frontend.
+**Real runtime stack:** FastAPI + CrewAI (crews & Flow) → local Ollama via `backend/llm` routing (cloud fallback ready). React 18 (CRA) frontend.
 
-**Runtime:** CrewAI (1.x) is installed and powers the research and drafting stages via `ResearchCrew` / `ContentCrew`, wired into the flow with a direct-Ollama fallback. Still-unwired CrewAI-shaped scaffolding: `quality_crew.py`, the critic/fact-check/edit/social task factories, and all of `backend/rag/` (migration Phases 2–3). LangChain is present only as a CrewAI dependency — do not import it directly.
+**Runtime:** CrewAI (1.x) powers the full pipeline: `ContentFactoryFlow` (a real CrewAI `Flow` in `backend/flows/crew_flow.py`) orchestrates `ResearchCrew` → `ContentCrew` → `QualityCrew` with a `@router`-driven revision loop. `MainContentFlow` tries the CrewAI flow first and falls back to the hand-rolled direct-Ollama path on any failure. Still unwired (Phase 3): `backend/rag/`, the social task factory, and the Tavily tool. LangChain is present only as a CrewAI dependency — do not import it directly.
 
 **Python:** requires `>=3.10,<3.14` — CrewAI has no Python 3.14-compatible release, so the venv runs Python 3.12.
 
@@ -20,7 +20,7 @@ Automated Content Factory: a multi-stage content generation pipeline (research �
 | Backend (dev) | `./scripts/run.sh` — uvicorn `backend.main:app` on `:8000` (uses `venv/bin/uvicorn` if present) |
 | Frontend (dev) | `cd frontend && npm install && npm start` — on `:3000`, proxies `/api` to `:8000` |
 | Docker | `docker-compose up --build` — backend + redis (redis is declared but **unused** by code) |
-| Tests (fast) | `venv/bin/python -m pytest tests/unit tests/security -q` (29 tests) |
+| Tests (fast) | `venv/bin/python -m pytest tests/unit tests/security -q` (33 tests) |
 | Lint (unenforced) | `black .`, `flake8 .` |
 | Evaluation | `venv/bin/python -m evaluation.run_evaluation` — **must be run as a module from repo root**; `python evaluation/run_evaluation.py` fails (`ModuleNotFoundError: No module named 'evaluation'`) |
 
@@ -30,11 +30,12 @@ Automated Content Factory: a multi-stage content generation pipeline (research �
 
 - **Entry point:** `POST /api/generate` with body `{"topic": str}` → `MainContentFlow(topic).execute()` (`backend/flows/main_flow.py`). Also `GET /` and `GET /health`. Responses include a `meta` block (`project`, `environment`) injected by the route via `get_settings()`.
 - **Pipeline:** input guardrail → researcher → writer → critic → fact-checker → revision loop (`max_revisions=3`) → output guardrail → social-format generation. Returns `blog_post`, `linkedin_post`, `x_post`, `detailed_overview`, `metrics`, `status`.
-- **Critic & fact-checker are real:** both call Ollama and parse a strict response format (`CLARITY/ENGAGEMENT/APPROVED/SUGGESTIONS` and `VERDICT/CLAIMS` — see the `_parse_*` helpers in `main_flow.py`). Unparseable or empty responses fall back to lenient pre-approved feedback so the pipeline still completes when Ollama is down. The revision loop re-critiques and re-checks the *edited* content each iteration, so it can converge before hitting the cap.
-- **LLM calls:** `async_query_ollama()` in `main_flow.py` POSTs to `{settings.OLLAMA_BASE_URL}/api/generate` (90 s timeout, temp 0.7). **It swallows all exceptions and returns `""`**; every caller has canned fallback content. Preserve this pattern — letting exceptions propagate will turn Ollama downtime into API 500s. The critic/fact-check/edit/social stages still use this directly until Phase 2.
+- **Two execution paths, one contract:** `execute()` first runs the CrewAI `ContentFactoryFlow` (`backend/flows/crew_flow.py`): input guardrail (raises `InputGuardrailRejected` → guardrail-failure payload) → `ResearchCrew` → `ContentCrew` → `QualityCrew.review()` → `@router` quality gate → edit/re-review loop (cap `max_revisions`) → accept. Social generation, the output guardrail, and response assembly are shared via `_assemble_result()`. Any CrewAI-flow failure falls back to the direct path: the same stages run as flow methods over `async_query_ollama`, with parsing via the shared helpers in `backend/parsing.py` (`parse_critique`, `parse_fact_check_response`). Unparseable responses fall back to lenient pre-approved values so the pipeline completes even with a misbehaving model.
+- **LLM calls (direct fallback path):** `async_query_ollama()` in `main_flow.py` POSTs to `{settings.OLLAMA_BASE_URL}/api/generate` (90 s timeout, temp 0.7). **It swallows all exceptions and returns `""`**; every caller has canned fallback content. Preserve this pattern — letting exceptions propagate will turn Ollama downtime into API 500s.
 - **LLM routing (`backend/llm/factory.py`):** the CrewAI crews get their LLM from `get_llm()` — it probes Ollama (`/api/tags`, 2 s budget) and returns a CrewAI `LLM`; on repeated failure a circuit breaker (`LLM_CIRCUIT_FAILURE_THRESHOLD` / `LLM_CIRCUIT_RECOVERY_SECONDS`) routes to the cloud fallback (OpenAI, then Anthropic) only when `LLM_CLOUD_ENABLED` and the key are set. `get_llm()` returns None if crewai isn't installed — callers must handle that.
-- **CrewAI wiring:** `run_researcher` / `run_writer` try `ResearchCrew` / `ContentCrew` first (via `asyncio.to_thread` — `kickoff()` is blocking) and silently fall back to the direct path on any crew failure. Crews and agents set `memory=False` so CrewAI never tries to call OpenAI embeddings behind your back.
-- **"Agents":** classes in `backend/agents/` are plain Python returning `{role, goal, backstory}` config dicts. The live flow implements each agent as a flow method that calls `async_query_ollama` with a system prompt built from the role. There is no agent framework.
+- **CrewAI wiring:** `crew.kickoff()` and `flow.kickoff()` are blocking — never call from async code without `asyncio.to_thread` (the CrewAI Flow itself runs inside `to_thread` from `execute()`). Crews and agents set `memory=False` so CrewAI never tries to call OpenAI embeddings behind your back.
+- **CrewAI Flow gotchas (verified on crewai 1.15):** flow state is hydrated with `kickoff(inputs={...})` — `state=` at construction is silently ignored; state models used with `Flow[State]` need defaults on every field because the flow projection re-validates them (hence `FlowState.topic = ""`). Revision loops need **two routers** (`@router(review)` + `@router(re_review)`) — a single router behind an `or_()` listener does not re-fire after the first pass. Flow methods can only `@listen` to methods defined *above* them in the class body, and a handler can't listen to a route key equal to its own name.
+- **"Agents":** `backend/agents/*.py` build real CrewAI `Agent` objects (role/goal/backstory preserved verbatim) with `llm=get_llm(...)` and `memory=False`. The direct fallback path implements equivalent behavior as flow methods with hand-built system prompts.
 - **Config:** single pydantic-settings `Settings` singleton — import as `from backend.config import settings` (`env_file=".env"`, `extra="ignore"`). `OLLAMA_BASE_URL` / `OLLAMA_MODEL` (in `backend/config.py`) are the settings that matter; both are now in `.env.example`.
 - **Logging:** `from backend.observability.logger import get_logger`, then `logger = get_logger("<module>")` — INFO to stdout. `settings.LOG_LEVEL` is defined but not wired to the logger.
 - **State:** pydantic v2 schemas in `backend/models/`; central `FlowState` in `backend/models/state.py`.
@@ -56,7 +57,7 @@ Automated Content Factory: a multi-stage content generation pipeline (research �
 
 ## Intentional Scaffolding (unwired by design — don't wire or remove without a decision)
 
-- `backend/crews/quality_crew.py` and the critic/fact-check/edit/social factories in `backend/tasks/` — stubs awaiting migration Phase 2 (QualityCrew + revision loop via a CrewAI Flow router). The research/content crews and their tasks are **real and wired**.
+- `backend/tasks/social_task.py` — stub awaiting Phase 3/4 (social generation is currently the flow's `generate_social_media`, not a CrewAI task).
 - `backend/rag/` — unwired stubs (Phase 3: Ollama embeddings + chromadb, which is already installed).
 - `backend/tools/tavily_search.py` — stub returning fake results; Phase 3 wires the real Tavily tool.
 - redis in `docker-compose.yml` + `REDIS_URL` / `VECTOR_DB_URL` in config — reserved for the RAG work above.

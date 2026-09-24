@@ -1,26 +1,23 @@
-from typing import Dict, Any
+from crewai import Agent
+
+from backend.llm.factory import get_llm
+
+EDITOR_ROLE = "Executive Revision Editor"
+EDITOR_GOAL = "Refine, polish, and revise drafts based on critic feedback and factual audit reports."
+EDITOR_BACKSTORY = (
+    "A precise line editor who excels at rewriting text to fix factual errors, "
+    "improve readability, and eliminate hallucinated statements while maintaining voice."
+)
 
 
-class EditorAgent:
-    """Editor Agent responsible for refining content based on critique and revision feedback."""
-
-    def __init__(self):
-        self.role = "Executive Revision Editor"
-        self.goal = "Refine, polish, and revise drafts based on critic feedback and factual audit reports."
-        self.backstory = (
-            "A precise line editor who excels at rewriting text to fix factual errors, "
-            "improve readability, and eliminate hallucinated statements while maintaining voice."
-        )
-
-    def get_agent_config(self) -> Dict[str, Any]:
-        return {
-            "role": self.role,
-            "goal": self.goal,
-            "backstory": self.backstory,
-            "verbose": True,
-            "allow_delegation": False,
-        }
-
-
-def create_editor_agent() -> Dict[str, Any]:
-    return EditorAgent().get_agent_config()
+def create_editor_agent() -> Agent:
+    """Build the CrewAI editor agent (LLM routed via the factory)."""
+    return Agent(
+        role=EDITOR_ROLE,
+        goal=EDITOR_GOAL,
+        backstory=EDITOR_BACKSTORY,
+        llm=get_llm("editor"),
+        verbose=True,
+        allow_delegation=False,
+        memory=False,
+    )

@@ -9,7 +9,7 @@ from backend.models.social import SocialMediaCampaign
 
 
 class FlowState(BaseModel):
-    topic: str
+    topic: str = ""
     research: Optional[ResearchOutput] = None
     draft: Optional[DraftContent] = None
     critique: Optional[CritiqueFeedback] = None
