@@ -18,12 +18,10 @@ automated-content-factory/
 ├── frontend/           # React user interface
 ├── tests/              # Unit, integration, and security tests
 ├── evaluation/         # Benchmark topics and metric evaluation scripts
-├── docs/               # System documentation, security guides & architecture
-│   └── architecture.md # Complete system architecture & technical deep-dive
-└── scripts/            # Helper scripts
+├── scripts/            # Helper scripts
+├── Dockerfile          # Backend container image
+└── docker-compose.yml  # Backend + Redis orchestration
 ```
-
-For a detailed technical breakdown, system component diagrams, and data flow sequences, see **[Architecture Documentation](file:///Users/nidhirajkotiya/Projects/AutomatedContentCreation/docs/architecture.md)**.
 
 ## 🚦 Getting Started
 
@@ -35,7 +33,25 @@ For a detailed technical breakdown, system component diagrams, and data flow seq
    ```bash
    pip install -e .
    ```
-3. Run the development server:
+3. Run the backend development server:
    ```bash
    ./scripts/run.sh
    ```
+   The API will be available at `http://localhost:8000`.
+4. In a separate terminal, start the React frontend:
+   ```bash
+   cd frontend
+   npm install
+   npm start
+   ```
+   The UI will be available at `http://localhost:3000` and proxies API requests to the backend.
+
+## 🐳 Docker
+
+Alternatively, run the backend and Redis together with Docker:
+
+```bash
+docker-compose up --build
+```
+
+This starts the backend on `http://localhost:8000` and a Redis instance on port `6379`.
