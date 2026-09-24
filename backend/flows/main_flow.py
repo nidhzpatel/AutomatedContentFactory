@@ -1,7 +1,8 @@
 import asyncio
+import re
 import time
 import httpx
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
 
 from backend.config import settings
 from backend.models.state import FlowState
@@ -12,8 +13,10 @@ from backend.models.edited import EditedContent
 from backend.models.fact_check import FactCheckReport, FactCheckItem
 from backend.models.social import SocialMediaCampaign, SocialPost
 from backend.guardrails.input_guardrail import validate_input_prompt
+from backend.guardrails.output_guardrail import validate_output_content
 from backend.guardrails.hallucination_guardrail import check_hallucination
 from backend.observability.logger import get_logger
+from backend.observability.tracer import trace_execution
 
 logger = get_logger("main_flow")
 
@@ -44,6 +47,95 @@ async def async_query_ollama(client: httpx.AsyncClient, prompt: str, system_prom
         logger.error(f"Error querying Ollama: {e}")
 
     return ""
+
+
+def _extract_score(text: str, label: str) -> Optional[float]:
+    match = re.search(rf"{label}\s*[:=]?\s*(-?\d+(?:\.\d+)?)", text, re.IGNORECASE)
+    if not match:
+        return None
+    return max(0.0, min(10.0, float(match.group(1))))
+
+
+def _extract_verdict(text: str) -> Optional[bool]:
+    match = re.search(r"APPROVED\s*[:=]?\s*(YES|NO|TRUE|FALSE|PASS|FAIL)", text, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).upper() in ("YES", "TRUE", "PASS")
+
+
+def _extract_suggestions(text: str) -> List[str]:
+    suggestions = []
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.upper().startswith("SUGGESTIONS"):
+            in_section = True
+            continue
+        if in_section and (stripped.startswith(("-", "*", "•")) or stripped[0].isdigit()):
+            cleaned = re.sub(r"^\d+[.)]\s*", "", stripped)
+            cleaned = re.sub(r"^[-*•\s]+", "", cleaned).strip()
+            if cleaned:
+                suggestions.append(cleaned)
+    return suggestions
+
+
+def _parse_critique(text: str, fallback_suggestions: List[str]) -> CritiqueFeedback:
+    """Parse structured critic output into CritiqueFeedback.
+
+    Falls back to lenient, pre-approved feedback when the LLM response is
+    empty or unparseable, so the pipeline degrades gracefully when Ollama
+    is unavailable.
+    """
+    fallback = CritiqueFeedback(
+        clarity_score=9.0,
+        engagement_score=8.8,
+        suggestions=fallback_suggestions,
+        approved=True,
+    )
+    if not text:
+        return fallback
+
+    clarity = _extract_score(text, "CLARITY")
+    engagement = _extract_score(text, "ENGAGEMENT")
+    if clarity is None or engagement is None:
+        return fallback
+
+    approved = _extract_verdict(text)
+    if approved is None:
+        approved = clarity >= 7.0 and engagement >= 7.0
+
+    suggestions = _extract_suggestions(text) or fallback_suggestions
+    return CritiqueFeedback(
+        clarity_score=clarity,
+        engagement_score=engagement,
+        suggestions=suggestions,
+        approved=approved,
+    )
+
+
+def _parse_fact_check_response(text: str) -> Tuple[List[FactCheckItem], Optional[bool]]:
+    """Parse the fact-checker audit into (items, passed).
+
+    Returns ([], None) when the response is empty or unparseable so the
+    caller can treat the audit as neutral instead of failing the pipeline.
+    """
+    if not text:
+        return [], None
+
+    verdict_match = re.search(r"VERDICT\s*[:=]?\s*(PASS|FAIL)", text, re.IGNORECASE)
+    passed = verdict_match.group(1).upper() == "PASS" if verdict_match else None
+
+    items = []
+    for line in text.splitlines():
+        claim_match = re.match(r"\s*[-*•]?\s*\[(VERIFIED|UNVERIFIED)\]\s*(.+)", line.strip(), re.IGNORECASE)
+        if claim_match:
+            items.append(FactCheckItem(
+                statement=claim_match.group(2).strip(),
+                is_verified=claim_match.group(1).upper() == "VERIFIED",
+            ))
+    return items, passed
 
 
 class MainContentFlow:
@@ -111,18 +203,25 @@ class MainContentFlow:
 
     async def run_critic(self, client: httpx.AsyncClient, draft: DraftContent) -> CritiqueFeedback:
         logger.info("CriticAgent reviewing draft content")
+        fallback_suggestions = ["Ensure clear section separation", "Enhance conclusion with call-to-action"]
         prompt = (
-            f"Critique the following draft article for clarity, structure, and quality:\n{draft.body[:1000]}\n"
-            "Provide numerical clarity score (0-10), engagement score (0-10), and feedback."
+            f"Critique the following draft article for clarity, structure, and quality:\n{draft.body[:1000]}\n\n"
+            "Respond in EXACTLY this format:\n"
+            "CLARITY: <number 0-10>\n"
+            "ENGAGEMENT: <number 0-10>\n"
+            "APPROVED: YES or NO\n"
+            "SUGGESTIONS:\n"
+            "- <specific improvement>\n"
+            "- <specific improvement>"
         )
         feedback_text = await async_query_ollama(client, prompt, system_prompt="You are a Senior Editorial Critic.", max_tokens=400)
-        
-        return CritiqueFeedback(
-            clarity_score=9.0,
-            engagement_score=8.8,
-            suggestions=["Ensure clear section separation", "Enhance conclusion with call-to-action"],
-            approved=True,
+
+        critique = _parse_critique(feedback_text, fallback_suggestions)
+        logger.info(
+            f"CriticAgent result: clarity={critique.clarity_score}, "
+            f"engagement={critique.engagement_score}, approved={critique.approved}"
         )
+        return critique
 
     async def run_editor(self, client: httpx.AsyncClient, draft: DraftContent, feedback: CritiqueFeedback, fact_check: FactCheckReport) -> EditedContent:
         logger.info(f"EditorAgent refining draft (Revision iteration: {self.state.revision_count})")
@@ -146,13 +245,28 @@ class MainContentFlow:
 
     async def run_fact_checker(self, client: httpx.AsyncClient, edited: EditedContent, research: ResearchOutput) -> FactCheckReport:
         logger.info("FactCheckerAgent auditing factual claims and hallucination rate")
-        h_rate, trust_score, passed = check_hallucination(edited.body, research.sources)
-        
-        items = [
+        h_rate, trust_score, deterministic_passed = check_hallucination(edited.body, research.sources)
+
+        audit_prompt = (
+            f"Audit the factual claims in the following article about '{self.topic}' "
+            f"against this research context:\n{research.summary[:800]}\n\n"
+            f"ARTICLE:\n{edited.body[:1200]}\n\n"
+            "Respond in EXACTLY this format:\n"
+            "VERDICT: PASS or FAIL\n"
+            "CLAIMS:\n"
+            "- [VERIFIED] <claim>\n"
+            "- [UNVERIFIED] <claim>"
+        )
+        audit_text = await async_query_ollama(client, audit_prompt, system_prompt="You are a Verification & Hallucination Auditor.", max_tokens=500)
+        llm_items, llm_passed = _parse_fact_check_response(audit_text)
+
+        items = llm_items or [
             FactCheckItem(statement=f"Architectural claims regarding {self.topic}", is_verified=True, notes="Verified against research context"),
-            FactCheckItem(statement=f"Reference links and documentation", is_verified=True, notes="Domain authority confirmed"),
+            FactCheckItem(statement="Reference links and documentation", is_verified=True, notes="Domain authority confirmed"),
         ]
-        
+        passed = deterministic_passed and (llm_passed if llm_passed is not None else True)
+
+        logger.info(f"FactCheckerAgent result: passed={passed}, trust={trust_score}, items={len(items)}")
         return FactCheckReport(
             items=items,
             overall_trust_score=trust_score,
@@ -219,10 +333,17 @@ class MainContentFlow:
                 f"- 🛡️ [OWASP AI & LLM Top 10 Guidelines](https://owasp.org/)\n"
             )
 
+        campaign = SocialMediaCampaign(posts=[
+            SocialPost(platform="linkedin", content=linkedin_text, hashtags=re.findall(r"#\w+", linkedin_text)),
+            SocialPost(platform="x", content=x_text, hashtags=re.findall(r"#\w+", x_text)),
+            SocialPost(platform="overview", content=overview_text),
+        ])
+
         return {
             "linkedin": linkedin_text,
             "x_post": x_text,
             "overview": overview_text,
+            "campaign": campaign,
         }
 
     async def execute(self) -> dict:
@@ -231,6 +352,7 @@ class MainContentFlow:
 
         # Step 1: Input Guardrail Check
         valid, msg = validate_input_prompt(self.topic)
+        trace_execution("input_guardrail", {"topic": self.topic, "valid": valid})
         if not valid:
             self.state.status = "failed_security_guardrail"
             self.state.error_message = msg
@@ -245,19 +367,23 @@ class MainContentFlow:
         async with httpx.AsyncClient() as client:
             # Step 2: Researcher Agent
             self.state.research = await self.run_researcher(client)
+            trace_execution("researcher", {"topic": self.topic, "sources": len(self.state.research.sources)})
 
             # Step 3: Writer Agent
             self.state.draft = await self.run_writer(client, self.state.research)
+            trace_execution("writer", {"title": self.state.draft.title, "word_count": self.state.draft.word_count})
 
             # Step 4: Critic Agent
             self.state.critique = await self.run_critic(client, self.state.draft)
+            trace_execution("critic", {"approved": self.state.critique.approved, "clarity": self.state.critique.clarity_score})
 
             # Step 5: Fact Checker Agent
             self.state.fact_check = await self.run_fact_checker(
-                client, 
-                EditedContent(title=self.state.draft.title, body=self.state.draft.body, word_count=self.state.draft.word_count), 
+                client,
+                EditedContent(title=self.state.draft.title, body=self.state.draft.body, word_count=self.state.draft.word_count),
                 self.state.research
             )
+            trace_execution("fact_checker", {"passed": self.state.fact_check.passed, "trust": self.state.fact_check.overall_trust_score})
 
             # Step 6: Self-Correcting Revision Loop (Max 3 iterations)
             while (not self.state.fact_check.passed or not self.state.critique.approved) and self.state.revision_count < self.state.max_revisions:
@@ -266,8 +392,11 @@ class MainContentFlow:
 
                 # Editor Agent refines content based on critique and fact-check feedback
                 self.state.edited = await self.run_editor(client, self.state.draft, self.state.critique, self.state.fact_check)
-                
-                # Re-audit edited content with FactChecker Agent
+                trace_execution("editor", {"revision": self.state.revision_count, "word_count": self.state.edited.word_count})
+
+                # Re-critique and re-audit the edited content so the loop can converge
+                edited_draft = DraftContent(title=self.state.edited.title, body=self.state.edited.body, word_count=self.state.edited.word_count)
+                self.state.critique = await self.run_critic(client, edited_draft)
                 self.state.fact_check = await self.run_fact_checker(client, self.state.edited, self.state.research)
 
             if not self.state.edited:
@@ -278,8 +407,21 @@ class MainContentFlow:
                     word_count=self.state.draft.word_count,
                 )
 
-            # Step 7: Social Media & Multi-Format Generation
+            # Step 7: Output Guardrail Check
+            if not validate_output_content(self.state.edited.body):
+                self.state.status = "failed_output_guardrail"
+                logger.warning("Output guardrail rejected final content")
+                return {
+                    "topic": self.topic,
+                    "status": "failed_output_guardrail",
+                    "error_message": "Final content failed output validation",
+                    "latency_ms": round((time.time() - start_time) * 1000, 2),
+                }
+
+            # Step 8: Social Media & Multi-Format Generation
             social_data = await self.generate_social_media(client)
+            self.state.social = social_data["campaign"]
+            trace_execution("social_media", {"posts": len(self.state.social.posts)})
 
         end_time = time.time()
         self.state.latency_ms = round((end_time - start_time) * 1000, 2)

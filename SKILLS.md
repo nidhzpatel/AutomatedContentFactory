@@ -27,7 +27,8 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 ## Safety & Quality Guardrails
 
 - **Input screening** — prompt-injection / jailbreak detection (11 regex patterns: instruction overrides, DAN mode, `rm -rf`, `eval(`, etc.); violating requests are rejected before any generation with `status: failed_security_guardrail`.
-- **Hallucination check** — deterministic scan of generated text for flagged phrases; produces `hallucination_rate` and `trust_score`.
+- **Fact-check audit** — each draft is audited against the research context (LLM claim verification producing a `VERDICT` and per-claim `[VERIFIED]` / `[UNVERIFIED]` items) combined with a deterministic hallucination scan; produces `hallucination_rate` and `trust_score`, and a failing audit gates the revision loop.
+- **Output validation** — the final article must pass a non-empty output check; failure returns `status: failed_output_guardrail`.
 - **Input validation** — empty topics rejected with HTTP 400.
 
 ## Metrics & Evaluation
@@ -51,4 +52,4 @@ One `POST /api/generate` call with `{"topic": "..."}` returns:
 
 ## Scaffolding (defined, not yet live)
 
-CrewAI-shaped stubs exist for future extension and are **not wired into the pipeline**: sub-crews (`backend/crews/`), task definitions (`backend/tasks/`), RAG ingestion/embed/retrieve (`backend/rag/`), Tavily search tool, output-content guardrail, execution tracer, and the `SocialMediaCampaign` model.
+CrewAI-shaped stubs exist for future extension and are **not wired into the pipeline**: sub-crews (`backend/crews/`), task definitions (`backend/tasks/`), RAG ingestion/embed/retrieve (`backend/rag/`), and the Tavily search tool.
